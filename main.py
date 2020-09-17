@@ -8,13 +8,17 @@ from urllib.parse import urlparse, urlunparse
 import json
 import os
 from pyquery import PyQuery as pq
+import time
 
-UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.132 Safari/537.36'
+UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.133 Safari/537.36'
 WEBAPI_HOST = 'https://webapi.ctfile.com'
 GET_DIR_URL = WEBAPI_HOST + '/getdir.php'
 GET_FILE_URL1 = WEBAPI_HOST + '/getfile.php'
 GET_FILE_URL2 = WEBAPI_HOST + '/get_file_url.php'
 TEMP_DIR = 'temp'
+DOWNLOAD_DIR = 'download'
+
+DL_ERROR_FILELINKTIMEOUT = '下载链接已超时，请重新从文件夹获取。'
 
 class CtDir():
     def __init__(self, url):
@@ -26,7 +30,7 @@ class CtDir():
         self.s = requests.session()
         self.s.headers = {'user-agent': UA}
         # init self.status
-        if(os.path.exists(self.status_file)):
+        if self.status_exist():
             log.debug('read dir status')
             self.load_status()
         else:
@@ -41,21 +45,21 @@ class CtDir():
         with open(self.status_file) as f:
             self.status = json.loads(f.read())
 
+    def status_exist(self):
+        return os.path.isfile(self.status_file)
+
     def init_status(self):
         self.status = {
-            'list_finish' : False,
+            'loc': {},
+            'web': {},
         }
         with open(self.status_file, 'w') as f:
             f.write(json.dumps(self.status))
 
-    def get_dir_list(self):
+    def get_dir_list(self, get_dir_from_web):
         log.info('Get list for {}'.format(self.url))
-        if self.status['list_finish']:
-            log.info('get list from status file')
-            self.dir_list = self.status['dir_list']
-            self.folder_url = self.status['folder_url']
-            self.folder_name = self.status['folder_name']
-        else:
+        if get_dir_from_web or not self.status.get('web'):
+            loc = self.status['loc']
             log.info('get list from website')
             headers = {
                 'origin': self.urlparsed.netloc
@@ -70,31 +74,43 @@ class CtDir():
             }
             r = self.s.get(GET_DIR_URL, params=params, headers=headers)
             j = json.loads(r.text.encode().decode('utf-8-sig'))
-            self.folder_name = j['folder_name']
-            self.folder_url = j['url'] #real url
-            log.info('folder name: {}'.format(self.folder_name))
-            log.info('folder url: {}'.format(self.folder_url))
+            loc['name'] = j['folder_name']
+            loc['url'] = j['url'] #real url
+            log.info('folder name: {}'.format(loc['name']))
+            log.info('folder url: {}'.format(loc['url']))
 
-            r = self.s.get(WEBAPI_HOST + self.folder_url)
-            self.dir_list = json.loads(r.text)
+            r = self.s.get(WEBAPI_HOST + loc['url'])
+            self.status['web'] = json.loads(r.text)
 
-            self.status['list_finish'] = True
-            self.status['folder_url'] = self.folder_url
-            self.status['folder_name'] = self.folder_name
-            self.status['dir_list'] = self.dir_list
             self.save_status()
 
-    def dl_all(self):
-        if not os.path.exists(self.folder_name):
-            os.mkdir(self.folder_name)
+    def dl_dir(self):
+        loc = self.status['loc']
+        web = self.status['web']
+        if not os.path.exists(os.path.join(DOWNLOAD_DIR, loc['name'])):
+            os.mkdir(os.path.join(DOWNLOAD_DIR, loc['name']))
 
-        for i in self.dir_list['aaData']:
-            self.dl_file(i[1])
+        for i in web['aaData']:
+            p = pq(i[0])
+            fid = p('input').attr('value')
+            p = pq(i[1])
+            fn = p('a').text()
+            url = p('a').attr('href')
+            if loc.get(fid) and loc[fid]:
+                log.info('file {} {} downloaded, skip it'.format(fid, fn))
+            else:
+                success, error = self.dl_file(url, fn)
+                if success:
+                    loc[fid] = True
+                    self.save_status()
+                else:
+                    return success, error
 
-    def dl_file(self, aaData):
-        d = pq(aaData)
-        url = d('a').attr('href')
-        log.debug('download {}'.format(url))
+        return True, None
+
+    def dl_file(self, url, fn):
+        loc = self.status['loc']
+        log.info('download {} {}'.format(fn, url))
 
         # step 1
         headers = {
@@ -102,7 +118,7 @@ class CtDir():
         }
         # parameters
         params = {
-            'f' : d('a').attr('href').split('/')[-1],
+            'f' : url.split('/')[-1],
             'passcode' : '',
             'r' : str(random.random()),
             'ref' : '',
@@ -110,8 +126,13 @@ class CtDir():
         r = self.s.get(GET_FILE_URL1, params=params, headers=headers)
         j = json.loads(r.text)
         log.debug('step 1 r={}'.format(json.dumps(j)))
-        fn = j['file_name']
-        log.info('download {}'.format(fn))
+
+        # link error handler
+        if j.get('code') == 404:
+            log.error('dl_file error: {}, {}'.format(url, j.get('message')))
+            if j.get('message') == DL_ERROR_FILELINKTIMEOUT:
+                log.error('need get dir list again')
+            return False, j.get('message')
 
         # step 2
         params = {
@@ -131,16 +152,28 @@ class CtDir():
 
         # step3
         r = self.s.get(j['downurl'].replace(r'\/', r'/'), headers=headers, stream=True)
-        with open(os.path.join(self.folder_name, fn), 'wb') as fd:
+        with open(os.path.join(DOWNLOAD_DIR, loc['name'], fn), 'wb') as fd:
             for chunk in r.iter_content(chunk_size=1024*1024):
                 fd.write(chunk)
 
+        return True, None
 
 
 def main():
+    stop = False
+    get_dir_from_web = False
+    error = None
     ct_dir = CtDir("https://n802.com/dir/11449240-27299530-05ba1e")
-    ct_dir.get_dir_list()
-    ct_dir.dl_all()
+    while not stop:
+        if error == DL_ERROR_FILELINKTIMEOUT:
+            get_dir_from_web = True
+        else:
+            get_dir_from_web = False
+        ct_dir.get_dir_list(get_dir_from_web)
+        success, error = ct_dir.dl_dir()
+        if success:
+            stop = True
+            log.info('download finished')
 
 if __name__ == "__main__":
     main()

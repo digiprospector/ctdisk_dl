@@ -129,3 +129,4 @@ dmypy.json
 .pyre/
 
 Pipfile.lock
+*.swp
