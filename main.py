@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import argparse
 from utils.logging import log
 import requests
 import random
@@ -9,8 +10,11 @@ import json
 import os
 from pyquery import PyQuery as pq
 import time
+import threading
 
-UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.133 Safari/537.36'
+UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.3239.133 Safari/537.39'
+DL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/63.0.{:04d}.{:03d} Safari/537.39'
+MOBILE_UA = 'Mozilla/5.0 (Linux; Android 5.1.1; SM-G9350 Build/LMY48Z) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/45.0.2454.94 Mobile Safari/537.36'
 WEBAPI_HOST = 'https://webapi.ctfile.com'
 GET_DIR_URL = WEBAPI_HOST + '/getdir.php'
 GET_FILE_URL1 = WEBAPI_HOST + '/getfile.php'
@@ -19,13 +23,66 @@ TEMP_DIR = 'temp'
 DOWNLOAD_DIR = 'download'
 
 DL_ERROR_FILELINKTIMEOUT = '下载链接已超时，请重新从文件夹获取。'
+DL_Threads_cnt = 16
+
+class DL_Thread(threading.Thread):
+    def __init__(self, i, url, params, headers, filename, start, end):
+        super().__init__()
+        self._params = params
+        self._index = i
+        self._url = url
+        self._headers = headers
+        self._filename = filename
+        self._start = start
+        self._end = end
+        self._UA = DL_UA.format(random.randrange(9999), self._index + 1)
+        self._s = requests.session()
+
+        self._headers['user-agent'] = self._UA
+
+    def run(self):
+        # step 2
+        while True:
+            self._params['rd'] = str(random.random())
+            r = self._s.get(GET_FILE_URL2, params=self._params, headers=self._headers)
+            j = json.loads(r.text)
+            log.info(r.status_code)
+            log.info('dl-{:03d} step 2 r={}'.format(self._index + 1, json.dumps(j)))
+            if j['code'] == 503 and j['message'] == 'require for verifycode':
+                log.info('dl-{:03d} retry'.format(self._index + 1))
+                self._UA = DL_UA.format(random.randrange(9999), self._index + 1)
+                self._headers['user-agent'] = self._UA
+            else:
+                break
+
+        with open(self._filename, 'r+b') as f:
+            f.seek(self._start)
+            log.info(j)
+            self._headers['Range'] = 'bytes={}-{}'.format(self._start, self._end)
+            r = self._s.get(j['downurl'].replace(r'\/', r'/'), headers=self._headers, stream=True)
+            if r.status_code == 503:
+                log.info(r.request.headers)
+                log.info(r.text)
+            s = 0
+            t = time.time()
+            l = t
+            for chunk in r.iter_content(chunk_size=128):
+                f.write(chunk)
+                s += len(chunk)
+                n = time.time()
+                if n - l > 3:
+                    log.info('dl-{:03d} speed {:02f} KB/s'.format(self._index + 1, s/(n-t)/1024))
+                    l = n
 
 class CtDir():
-    def __init__(self, url):
-        self.url = url
-        self.urlparsed = urlparse(url)
+    def __init__(self, args):
+        self.args = args
+        self.url = args.dir
+        self.urlparsed = urlparse(self.url)
         self.url_host = self.urlparsed.netloc
-        self.url_id = self.urlparsed.path.split('/')[-1]
+        # remove the last '/' if exist
+        path_split = self.urlparsed.path.split('/') 
+        self.url_id = path_split[-1] if path_split[-1] else path_split[-2]
         self.status_file = os.path.join(TEMP_DIR, self.url_id)
         self.s = requests.session()
         self.s.headers = {'user-agent': UA}
@@ -74,6 +131,10 @@ class CtDir():
             }
             r = self.s.get(GET_DIR_URL, params=params, headers=headers)
             j = json.loads(r.text.encode().decode('utf-8-sig'))
+            log.debug('r={}'.format(json.dumps(j)))
+            if j.get('code') == 404 or j.get('code') == 503:
+                log.error('dl_dir_list error: {}, {}'.format(self.url, j.get('message')))
+
             loc['name'] = j['folder_name']
             loc['url'] = j['url'] #real url
             log.info('folder name: {}'.format(loc['name']))
@@ -90,7 +151,7 @@ class CtDir():
         if not os.path.exists(os.path.join(DOWNLOAD_DIR, loc['name'])):
             os.mkdir(os.path.join(DOWNLOAD_DIR, loc['name']))
 
-        for i in web['aaData']:
+        for i in web['aaData'][24:25]:
             p = pq(i[0])
             fid = p('input').attr('value')
             p = pq(i[1])
@@ -114,6 +175,7 @@ class CtDir():
 
         # step 1
         headers = {
+            #'user-agent': MOBILE_UA,
             'origin': self.urlparsed.netloc,
         }
         # parameters
@@ -150,30 +212,75 @@ class CtDir():
         j = json.loads(r.text)
         log.debug('step 2 r={}'.format(json.dumps(j)))
 
-        # step3
-        r = self.s.get(j['downurl'].replace(r'\/', r'/'), headers=headers, stream=True)
-        with open(os.path.join(DOWNLOAD_DIR, loc['name'], fn), 'wb') as fd:
-            for chunk in r.iter_content(chunk_size=1024*1024):
-                fd.write(chunk)
+        # create an empty file
+        filename = os.path.join(DOWNLOAD_DIR, loc['name'], fn)
+        filesize = int(j['file_size'])
+        log.debug('create empty file {} size {}'.format(filename, filesize))
+        with open(filename, 'wb') as fd:
+            fd.truncate(filesize)
 
+        #donwload with thread
+        threads = []
+        for i in range(DL_Threads_cnt):
+            start = i * filesize // DL_Threads_cnt
+            end = (i + 1) * filesize // DL_Threads_cnt - 1 if i != DL_Threads_cnt - 1 else filesize
+
+            t = DL_Thread(i,
+                          j['downurl'].replace(r'\/', r'/'),
+                          params,
+                          headers,
+                          filename,
+                          start,
+                          end)
+            log.info('dl-{:03d} start={} end={}'.format(i+1, start, end))
+
+            threads.append(t)
+            t.start()
+            time.sleep(1)
+
+        for i in range(DL_Threads_cnt):
+            threads[i].join()
+
+        # step3
+        '''
+        #headers['Range'] = 'bytes=1024-'
+        r = self.s.get(j['downurl'].replace(r'\/', r'/'), headers=headers, stream=True)
+        with open(filename, 'wb') as fd:
+            s = 0
+            t = time.time()
+            l = t
+            for chunk in r.iter_content(chunk_size=128):
+                fd.write(chunk)
+                s += len(chunk)
+                n = time.time()
+                if n - l > 3:
+                    log.info('speed {:02f} KB/s'.format(s/(n-t)/1024))
+                    l = n
+
+        '''
         return True, None
 
 
 def main():
-    stop = False
-    get_dir_from_web = False
-    error = None
-    ct_dir = CtDir("https://n802.com/dir/11449240-27299530-05ba1e")
-    while not stop:
-        if error == DL_ERROR_FILELINKTIMEOUT:
-            get_dir_from_web = True
-        else:
-            get_dir_from_web = False
-        ct_dir.get_dir_list(get_dir_from_web)
-        success, error = ct_dir.dl_dir()
-        if success:
-            stop = True
-            log.info('download finished')
+    parser = argparse.ArgumentParser(description='Download from CTDisk.')
+    parser.add_argument('-d', '--dir', help='download a directory')
+    args = parser.parse_args()
+
+    if args.dir:
+        stop = False
+        get_dir_from_web = False
+        error = None
+        ct_dir = CtDir(args)
+        while not stop:
+            if error == DL_ERROR_FILELINKTIMEOUT:
+                get_dir_from_web = True
+            else:
+                get_dir_from_web = False
+            ct_dir.get_dir_list(get_dir_from_web)
+            success, error = ct_dir.dl_dir()
+            if success:
+                stop = True
+                log.info('download finished')
 
 if __name__ == "__main__":
     main()
