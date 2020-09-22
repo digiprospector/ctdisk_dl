@@ -25,6 +25,91 @@ DOWNLOAD_DIR = 'download'
 DL_ERROR_FILELINKTIMEOUT = '下载链接已超时，请重新从文件夹获取。'
 DL_Threads_cnt = 16
 
+class CtFile():
+    def __init__(self,
+                 url,
+                 session=None,
+                 folder=""):
+        self.s = session if session else requests.session()
+        self.url = url
+        self.urlparsed = urlparse(self.url)
+        self.folder = folder
+
+    def dl(self):
+        log.info('download {}'.format(self.url))
+
+        # step 1
+        headers = {
+            'origin': self.urlparsed.netloc,
+        }
+
+        # parameters
+        params = {
+            'f' : self.url.split('/')[-1],
+            'passcode' : '',
+            'r' : str(random.random()),
+            'ref' : '',
+        }
+        r = self.s.get(GET_FILE_URL1, params=params, headers=headers)
+        j = json.loads(r.text)
+        log.debug('step 1 r={}'.format(json.dumps(j)))
+
+        # link error handler
+        if j.get('code') == 404:
+            log.error('dl_file error: {}, {}'.format(url, j.get('message')))
+            if j.get('message') == DL_ERROR_FILELINKTIMEOUT:
+                log.error('need get dir list again')
+            return False, j.get('message')
+
+        fn = j['file_name']
+
+        # step 2
+        params = {
+            'uid': j['userid'],
+            'fid': j['file_id'],
+            'folder_id': 0,
+            'file_chk': j['file_chk'],
+            'mb': 0,
+            'app': 0,
+            'acheck': 1,
+            'verifycode': '',
+            'rd': str(random.random())
+        }
+        r = self.s.get(GET_FILE_URL2, params=params, headers=headers)
+        j = json.loads(r.text)
+        log.debug('step 2 r={}'.format(json.dumps(j)))
+
+        # create an empty file
+        filename = os.path.join(DOWNLOAD_DIR, self.folder, fn)
+        filesize = int(j['file_size'])
+        log.debug('create empty file {} size {}'.format(filename, filesize))
+        with open(filename, 'wb') as fd:
+            fd.truncate(filesize)
+
+        #donwload with thread
+        threads = []
+        for i in range(DL_Threads_cnt):
+            start = i * filesize // DL_Threads_cnt
+            end = (i + 1) * filesize // DL_Threads_cnt - 1 if i != DL_Threads_cnt - 1 else filesize
+
+            t = DL_Thread(i,
+                          j['downurl'].replace(r'\/', r'/'),
+                          params,
+                          headers,
+                          filename,
+                          start,
+                          end)
+            log.info('dl-{:03d} start={} end={}'.format(i+1, start, end))
+
+            threads.append(t)
+            t.start()
+            time.sleep(1)
+
+        for i in range(DL_Threads_cnt):
+            threads[i].join()
+
+        return True, None
+
 class DL_Thread(threading.Thread):
     def __init__(self, i, url, params, headers, filename, start, end):
         super().__init__()
@@ -160,7 +245,11 @@ class CtDir():
             if loc.get(fid) and loc[fid]:
                 log.info('file {} {} downloaded, skip it'.format(fid, fn))
             else:
-                success, error = self.dl_file(url, fn)
+                l = list(self.urlparsed)
+                l[3] = l[4] = l[5] = ""
+                l[2] = url
+                ct_file = CtFile(urlunparse(l), self.s, loc['name'])
+                success, error = ct_file.dl()
                 if success:
                     loc[fid] = True
                     self.save_status()
@@ -169,6 +258,7 @@ class CtDir():
 
         return True, None
 
+    '''
     def dl_file(self, url, fn):
         loc = self.status['loc']
         log.info('download {} {}'.format(fn, url))
@@ -241,29 +331,12 @@ class CtDir():
         for i in range(DL_Threads_cnt):
             threads[i].join()
 
-        # step3
-        '''
-        #headers['Range'] = 'bytes=1024-'
-        r = self.s.get(j['downurl'].replace(r'\/', r'/'), headers=headers, stream=True)
-        with open(filename, 'wb') as fd:
-            s = 0
-            t = time.time()
-            l = t
-            for chunk in r.iter_content(chunk_size=128):
-                fd.write(chunk)
-                s += len(chunk)
-                n = time.time()
-                if n - l > 3:
-                    log.info('speed {:02f} KB/s'.format(s/(n-t)/1024))
-                    l = n
-
-        '''
         return True, None
-
-
+    '''
 def main():
     parser = argparse.ArgumentParser(description='Download from CTDisk.')
     parser.add_argument('-d', '--dir', help='download a directory')
+    parser.add_argument('-f', '--file', help='download a file' )
     args = parser.parse_args()
 
     if args.dir:
@@ -281,6 +354,9 @@ def main():
             if success:
                 stop = True
                 log.info('download finished')
+    elif args.file:
+        ct_file = CtFile(url=args.file)
+        ct_file.dl()
 
 if __name__ == "__main__":
     main()
