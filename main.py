@@ -44,11 +44,12 @@ def requests_debug(r, prefix=''):
 
 
 class CtFile():
-    def __init__(self, url, args, fid=0, parent_dir=DOWNLOAD_DIR, session=None):
+    def __init__(self, url, args, filename='', fid=0, parent_dir=DOWNLOAD_DIR, session=None):
         self.url = url
         self.args = args
         self.fid = fid
         self.parent_dir = parent_dir
+        self.filename = filename
         self.s = session if session else requests.session()
 
         self.urlparsed = urlparse(self.url)
@@ -80,7 +81,8 @@ class CtFile():
                 log.error('need get dir list again')
             return False, j.get('message')
 
-        fn = j['file_name']
+        if not self.filename:
+            self.filename = j['file_name']
 
         # step 2
         params = {
@@ -105,7 +107,7 @@ class CtFile():
                 break
 
         # create an empty file
-        filename = os.path.join(self.parent_dir, fn)
+        filename = os.path.join(self.parent_dir, self.filename)
         filesize = int(j['file_size'])
         temp_filename = filename + '.ctdown'
         log.debug('create empty file {} size {}'.format(temp_filename, filesize))
@@ -374,7 +376,7 @@ class CtDir():
                     lst = list(self.urlparsed)
                     lst[3] = lst[4] = lst[5] = ""
                     lst[2] = url
-                    ct_file = CtFile(urlunparse(lst), self.args, value, dir_fullname, self.s)
+                    ct_file = CtFile(urlunparse(lst), self.args, name, value, dir_fullname, self.s)
                     file_thread = FileThread(ct_file)
 
                     # get the semaphare before create thread

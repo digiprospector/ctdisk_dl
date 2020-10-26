@@ -26,7 +26,7 @@ def get_logger():
 
         s_handler = logging.StreamHandler()
         s_handler.setFormatter(formatter)
-        s_handler.setLevel(logging.INFO)
+        s_handler.setLevel(logging.ERROR)
         logger.addHandler(s_handler)
 
         f_handler = RotatingFileHandler(os.path.join('log', 'log'), maxBytes=10000000, backupCount=5)
