@@ -6,11 +6,11 @@
 文件分块 -s\
 同时多个文件 -c\
 
-optional arguments:<br />
-  -h, --help            show this help message and exit<br />
-  -d DIR, --dir DIR     download a directory<br />
-  -f FILE, --file FILE  download a file<br />
-  -s SPLIT, --split SPLIT<br />
-                        split a files to parts<br />
-  -c DL_CNT, --dl_cnt DL_CNT<br />
-                        download files concorrent<br />
+optional arguments:\
+  -h, --help            show this help message and exit\
+  -d DIR, --dir DIR     download a directory\
+  -f FILE, --file FILE  download a file\
+  -s SPLIT, --split SPLIT\
+                        split a files to parts\
+  -c DL_CNT, --dl_cnt DL_CNT\
+                        download files concorrent
