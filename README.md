@@ -1,10 +1,10 @@
 # ctdisk_dl
 城通网盘下载,多线程下载
 
-下载文件用 -f<br />
-下载目录用 -d<br />
-文件分块 -s<br />
-同时多个文件 -c<br />
+下载文件用 -f\
+下载目录用 -d\
+文件分块 -s\
+同时多个文件 -c\
 
 optional arguments:<br />
   -h, --help            show this help message and exit<br />
