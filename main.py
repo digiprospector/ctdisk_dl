@@ -70,18 +70,20 @@ class CtFile():
             'ref': '',
         }
         r = self.s.get(GET_FILE_URL1, params=params, headers=headers)
-        j = json.loads(r.text)
+        j_full = json.loads(r.text)
+        j = j_full.get('file')#add a sub dict
         log.debug('step 1')
         requests_debug(r)
 
         # link error handler
-        if j.get('code') == 404:
-            log.error('dl_file error: {}'.format(j.get('message')))
-            if j.get('message') == DL_ERROR_FILELINKTIMEOUT:
+        if j_full.get('code') == 404:
+            log.error('dl_file error: {}'.format(j_full.get('message')))
+            if j_full.get('message') == DL_ERROR_FILELINKTIMEOUT:
                 log.error('need get dir list again')
-            return False, j.get('message')
+            return False, j_full.get('message')
 
         if not self.filename:
+            #print(j.get('file').get('file_name'))
             self.filename = j['file_name']
 
         # step 2
